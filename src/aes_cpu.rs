@@ -6,7 +6,68 @@ extern crate numrs;
 use numrs::matrix;
 use numrs::matrix::Matrix;
 
-static mut DEBUG_PRINTING: bool = false;
+struct AesKey {
+    key: Matrix<u8>,
+}
+
+impl AesKey {
+    fn new(key: &[u8]) -> Self {
+        //key初始为4*4的矩阵
+        let mut key_matrix = matrix::from_elems(4, 4, key);
+        key_matrix.transpose();
+
+        //将key填充为4*(4*11)的矩阵
+        let mut round_key = Matrix::new(4, 4 * 11, 0u8);
+        key_expansion(&mut round_key, &key_matrix);
+        return Self {
+            key: round_key,
+        }
+    }
+}
+
+
+pub struct AesEcb {
+    aes_key: AesKey,
+}
+
+impl AesEcb {
+    pub fn new(key: &[u8]) -> Self {
+        return Self {
+            aes_key: AesKey::new(key),
+        }
+    }
+
+    pub fn encrypt(&self, plaintext: &[u8]) -> String {
+        let mut ciphertext = String::new();
+    
+        //每16位进行一次加密
+        let mut index = 0;
+        loop {
+            let mut state: Matrix<u8>;
+            //初始化一个4*4的全0矩阵
+            state = matrix::from_elems(4, 4, &[0u8; 16]);
+            for i in 0..state.num_rows() {
+                for j in 0..state.num_cols() {
+                    if index >= plaintext.len() {
+                        break;
+                    }
+                    //将byte_array的值填充进state
+                    state.set(j, i, plaintext[index]);
+                    index += 1;
+                }
+            }
+            //加密该明文段
+            encrypt_state_block(&mut state, &self.aes_key.key);
+            //append密文
+            encrypted_append(&mut ciphertext, &state);
+    
+            if index >= plaintext.len() {
+                break;
+            }
+        }
+        ciphertext
+    }
+}
 
 fn get_sbox() -> Matrix<u8> {
     let sbox = [
@@ -33,24 +94,21 @@ fn get_sbox() -> Matrix<u8> {
     sbox
 }
 
-/*
- * Round constant word array, Rcon.
- * Only first 11 values are used for AES-128.
- */
 fn get_rcon_col(col: usize) -> Matrix<u8> {
+    //对于AES-128，用11个值的常量数组
     let rcon = [
         0x8d, 0x01, 0x02, 0x04, 0x08, 0x10, 0x20, 0x40, 0x80, 0x1b, 0x36,
     ];
+    //取对应的值转换为一维矩阵
     let rcon = matrix::from_elems(4, 1, &[rcon[col], 0, 0, 0]);
     rcon
 }
 
-/*
- * matrix_row_rotate: Helper function to rotate a row of bytes a given
- * amount of iterations from left-to-right
- */
+
 fn matrix_row_rotate(m: &mut Matrix<u8>, row: usize, iters: usize) {
-    // Move the first item to the last place, and shift everything left.
+    //将某一行的某个位置的数移动到最左侧
+    //其他数字跟着移动，总体顺序不变
+    //比如将[a0,a1,a2,a3]的a0移到最左，变成：[a1,a2,a3,a0]
     let row_nums = [
         m.get(row, (0 + iters) % 4),
         m.get(row, (1 + iters) % 4),
@@ -58,16 +116,11 @@ fn matrix_row_rotate(m: &mut Matrix<u8>, row: usize, iters: usize) {
         m.get(row, (3 + iters) % 4),
     ];
 
-    // Place the shifted row_nums number back in
     for col in 0..4 {
         m.set(row, col, row_nums[col]);
     }
 }
 
-/*
- * shift_rows: Performs the ShiftRows operation of Rijndael
- * For each row, depending on its depth, we shift it by that number
- */
 fn shift_rows(state: &mut Matrix<u8>) {
     for depth in 1..state.num_rows() {
         matrix_row_rotate(state, depth, depth);
@@ -75,24 +128,17 @@ fn shift_rows(state: &mut Matrix<u8>) {
 }
 
 fn mix_single_column(col: &mut [u8; 4]) {
-    // Ref: https://en.wikipedia.org/wiki/Rijndael_MixColumns
-    // The array 'a' is simply a copy of the input array col
-    // The array 'b' is each element of the array 'a' multiplied by 2
-    // in Rijndael's Galois field
     let mut a = [0u8; 4];
     let mut b = [0u8; 4];
 
-    // a[n] ^ b[n] is element n multiplied by 3 in Rijndael's Galois field
-    for c in 0..4 {
-        a[c] = col[c];
-
-        // h is 0xff if the high bit of r[c] is set, 0 otherwise
-        let h = ((col[c] as i8) >> 7) as u8;
-
-        // implicitly removes high bit because b[c] is an 8-bit char,
-        // so we xor by 0x1b and not 0x11b in the next line
-        b[c] = col[c] << 1;
-        b[c] ^= 0x1b & h; // Rijndael's Galois field
+    //a[n]是输入数组的复制
+    //a[n] ^ b[n]是将a[n]乘了3，可能存在溢出
+    for i in 0..4 {
+        a[i] = col[i];
+        //h是col[i]的最高位
+        let h = ((col[i] as i8) >> 7) as u8;
+        b[i] = col[i] << 1;
+        b[i] ^= 0x1b & h;
     }
     col[0] = b[0] ^ a[3] ^ a[2] ^ b[1] ^ a[1]; // 2 * a0 + a3 + a2 + 3 * a1
     col[1] = b[1] ^ a[0] ^ a[3] ^ b[2] ^ a[2]; // 2 * a1 + a0 + a3 + 3 * a2
@@ -102,7 +148,7 @@ fn mix_single_column(col: &mut [u8; 4]) {
 
 fn mix_columns(state: &mut Matrix<u8>) {
     for col in 0..state.num_cols() {
-        // Get a column from the state matrix
+        //取出每一列
         let mut m_col = [
             state.get(0, col),
             state.get(1, col),
@@ -110,10 +156,8 @@ fn mix_columns(state: &mut Matrix<u8>) {
             state.get(3, col),
         ];
 
-        // Perform mix column
+        //mix column
         mix_single_column(&mut m_col);
-
-        // Substitute the result for the original column in the state
         for row in 0..state.num_rows() {
             state.set(row, col, m_col[row]);
         }
@@ -141,15 +185,16 @@ fn xor_matricies(m1: &mut Matrix<u8>, m2: &Matrix<u8>) {
 }
 
 fn key_expansion(round_key: &mut Matrix<u8>, key: &Matrix<u8>) {
-    // The first round key is the key itself
+    // round_key的第一个4*4的矩阵块就是key
     for i in 0..round_key.num_rows() {
-        for j in 0..round_key.num_rows() {
-            round_key.set(j, i, key.get(j, i));
+        for j in 0..4 {
+            round_key.set(i, j, key.get(i, j));
         }
     }
 
-    // All other round keys are found from the previous round keys
+    //处理剩下的10个4*4的矩阵
     for i in 4..4 * 11 {
+        //先将前一个列的值的复制过来，变成1*4的一维矩阵
         let mut col = matrix::from_elems(
             1,
             4,
@@ -161,19 +206,19 @@ fn key_expansion(round_key: &mut Matrix<u8>, key: &Matrix<u8>) {
             ],
         );
 
+        //如果是一个(4*4)矩阵块的第一列
         if i % 4 == 0 {
-            // Shift the 4 bytes in a word to the left once
-            // [a0,a1,a2,a3] becomes [a1,a2,a3,a0]
+            //将第二位挪动到最左边
             matrix_row_rotate(&mut col, 0, 1);
-
-            // Substitue the bytes within the column using the contents of the s-box
+            //将该列进行字符替换，打乱为新的列
             sub_bytes(&mut col);
 
-            // xor the col with the respective rcon column
+            //对最左的位置的数进行异或运算
+            //rcon_col形式为[a, 0, 0, 0]
             xor_matricies(&mut col, &get_rcon_col(i / 4));
         }
 
-        // xor the col with the previous i-4 col of the round key
+        //与上一个4*4的矩阵块对应的位置的列进行异或运算
         let init_col = matrix::from_elems(
             1,
             4,
@@ -186,106 +231,60 @@ fn key_expansion(round_key: &mut Matrix<u8>, key: &Matrix<u8>) {
         );
         xor_matricies(&mut col, &init_col);
 
-        // Insert the col into the round_key matrix
+        //将结果矩阵转置、更新到round_key的列
         for j in 0..round_key.num_rows() {
             round_key.set(j, i, col.get(0, j));
         }
     }
 }
 
-/*
- * sub_bytes: performs the SubBytes operation of Rijndael
- * SubBytes substitues an item in the state with another in the s-box,
- * depending on the first and second characters of the hexadecimal byte
- * contained at a specific row and col in the state.
- * The s-box is the same for all implementations of aes.
- */
+
 fn sub_bytes(state: &mut Matrix<u8>) {
+    //根据s-box将原本的值替换为另一个不同的值
     let sbox = get_sbox();
     for i in 0..state.num_rows() {
         for j in 0..state.num_cols() {
             let byte = state.get(i, j);
-
-            // Get the first and second component of the byte
+            //取当前值的高四位和低四位作为映射的索引
             let hex_col = byte & 0x0f;
             let hex_row = (byte & 0xf0) / 0x10;
-
-            // Now get the corresponding row,col from the sbox
-            // And overwrite the state with it
             state.set(i, j, sbox.get(hex_row as usize, hex_col as usize));
         }
     }
 }
 
-fn add_round_key(state: &mut Matrix<u8>, round_key: &Matrix<u8>, round: usize) {
+fn xor_round_key(state: &mut Matrix<u8>, round_key: &Matrix<u8>, round: usize) {
     let mut round_key_chunk = Matrix::new(4, 4, 0u8);
-
+    //取出key的第round+1个(4*4)的矩阵
     for i in 0..state.num_rows() {
         for j in round * 4..round * 4 + 4 {
             round_key_chunk.set(i, j % 4, round_key.get(i, j));
         }
     }
-
+    //逐位与明文进行异或
     xor_matricies(state, &round_key_chunk);
 }
 
 fn encrypt_state_block(state: &mut Matrix<u8>, round_key: &Matrix<u8>) {
-    // Initial round
-    add_round_key(state, round_key, 0);
-    // Intermediate and final round
+    //将明文与Key中的每一个4*4的矩阵块进行异或
+    xor_round_key(state, round_key, 0);
     for round in 1..11 {
+        //打乱中间结果
         sub_bytes(state);
         shift_rows(state);
         if round != 10 {
             mix_columns(state);
         }
-        add_round_key(state, round_key, round);
+        xor_round_key(state, round_key, round);
     }
 }
 
 fn encrypted_append(string: &mut String, state: &Matrix<u8>) {
     for i in 0..state.num_rows() {
         for j in 0..state.num_cols() {
-            string.push_str(&format!("{:02x} ", state.get(j, i)));
+            string.push_str(&format!("{:02x}", state.get(j, i)));
         }
     }
-    string.push_str("\n");
-}
-
-pub fn encrypt(byte_array: &[u8], key: &[u8]) -> String {
-    let mut encrypted_string = String::new();
-
-    // Perform key expansion
-    let mut key_matrix = matrix::from_elems(4, 4, key);
-    key_matrix.transpose();
-
-    let mut round_key = Matrix::new(4, 4 * 11, 0u8);
-    key_expansion(&mut round_key, &key_matrix);
-
-    // Loop through each 16 bytes of the provided string and encrypt separately
-    let mut index = 0;
-    loop {
-        let mut state: Matrix<u8>;
-        // Pad rest of matrix with zeros
-        state = matrix::from_elems(4, 4, &[0u8; 16]);
-        for i in 0..state.num_rows() {
-            for j in 0..state.num_cols() {
-                if index >= byte_array.len() {
-                    break;
-                }
-                state.set(j, i, byte_array[index]);
-                index += 1;
-            }
-        }
-        encrypt_state_block(&mut state, &round_key);
-        encrypted_append(&mut encrypted_string, &state);
-
-        // Break once we've reached the end of the string
-        if index >= byte_array.len() {
-            break;
-        }
-    }
-    encrypted_string
 }
 
 #[allow(dead_code)]
