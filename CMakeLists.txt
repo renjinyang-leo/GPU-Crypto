@@ -6,4 +6,4 @@ enable_language(CUDA)
 
 set(CMAKE_CXX_STANDARD 11)
 
-add_executable(gpu_aes gpu_aes.cu)
+add_executable(gpu_aes gpu_aes.cu aes_key.cpp)
