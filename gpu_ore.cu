@@ -538,24 +538,11 @@ __global__ void general_order_revealing_encryption_gpu(uint8_t *buf_device_plain
     atomicAdd(&buf_device_ciphertext[cipher_index], mask<<cipher_bit);
 }
 
-void encyrpt(uint64_t plaintext, uint8_t *key) {
-    u32 keywords_host[60];
-    for (int i = 0; i < 240; i += 4) {
-        keywords_host[i/4]=Byte2Word_host(key[i],key[i+1],key[i+2],key[i+3]);
-    }
-    cudaMemcpyToSymbol(keywords, keywords_host, sizeof(u32)*60);
+uint8_t *buf_device_plaintext;
+unsigned int *buf_device_ciphertext;
 
-    cudaMemcpyToSymbol(sbox, sbox, sizeof(uint8_t)*256);
-
-    uint8_t *buf_device_plaintext;
-    cudaMalloc((void**)&buf_device_plaintext, PLAINTEXT_SIZE);
+void encyrpt(uint64_t plaintext) {
     cudaMemcpy(buf_device_plaintext, &plaintext, PLAINTEXT_SIZE, cudaMemcpyHostToDevice);
-
-    uint8_t * test_buf = (uint8_t *)malloc(PLAINTEXT_SIZE);
-    memcpy(test_buf, &plaintext, PLAINTEXT_SIZE);
-
-    unsigned int *buf_device_ciphertext;
-    cudaMalloc((void**)&buf_device_ciphertext, PLAINTEXT_SIZE * MASK_SIZE);
     cudaMemset((void**)&buf_device_ciphertext, 0, PLAINTEXT_SIZE * MASK_SIZE);
 
     general_order_revealing_encryption_gpu<<<1, 64>>>(buf_device_plaintext, buf_device_ciphertext);
@@ -563,17 +550,12 @@ void encyrpt(uint64_t plaintext, uint8_t *key) {
     unsigned int buf_host_ciphertext[4];
     cudaMemcpy(buf_host_ciphertext, buf_device_ciphertext, PLAINTEXT_SIZE * MASK_SIZE, cudaMemcpyDeviceToHost);
     for (int i = 0; i < 4; i++) {
-       printf("%X", buf_host_ciphertext[i]);
+       printf("%08X\n", buf_host_ciphertext[i]);
     }
     printf("\n");
 }
-int main() {
-    // 生成密钥
-    uint8_t seed[32];
-    for (int i = 0; i < sizeof(seed);i++) seed[i] = i;
-    AesKey aes_key;
-    create_aes_key(seed, aes_key);
 
+void init_env() {
     // 设置gpu
     int deviceCount = 0;
     cudaError_t error_id = cudaGetDeviceCount(&deviceCount);
@@ -592,5 +574,26 @@ int main() {
     cudaMemcpyToSymbol(cuda_Te2,Te2,256*sizeof(u32));
     cudaMemcpyToSymbol(cuda_Te3,Te3,256*sizeof(u32));
 
-    encyrpt(100000, aes_key.key);
+    cudaMemcpyToSymbol(sbox, sbox, sizeof(uint8_t)*256);
+
+    // 生成密钥
+    uint8_t seed[32];
+    for (int i = 0; i < sizeof(seed);i++) seed[i] = i;
+    AesKey aes_key;
+    create_aes_key(seed, aes_key);
+
+    u32 keywords_host[60];
+    for (int i = 0; i < 240; i += 4) {
+        keywords_host[i/4]=Byte2Word_host(aes_key.key[i],aes_key.key[i+1],aes_key.key[i+2],aes_key.key[i+3]);
+    }
+    cudaMemcpyToSymbol(keywords, keywords_host, sizeof(u32)*60);
+
+    cudaMalloc((void**)&buf_device_plaintext, PLAINTEXT_SIZE);
+    cudaMalloc((void**)&buf_device_ciphertext, PLAINTEXT_SIZE * MASK_SIZE);
+}
+
+int main() {
+    init_env();
+    encyrpt(100000);
+    encyrpt(2021232);
 }
