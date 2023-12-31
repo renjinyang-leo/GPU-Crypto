@@ -541,13 +541,17 @@ __global__ void general_order_revealing_encryption_gpu(uint8_t *buf_device_plain
 uint8_t *buf_device_plaintext;
 unsigned int *buf_device_ciphertext;
 
+uint8_t *buf_host_plaintext;
+unsigned int *buf_host_ciphertext;
+
 void encyrpt(uint64_t plaintext) {
-    cudaMemcpy(buf_device_plaintext, &plaintext, PLAINTEXT_SIZE, cudaMemcpyHostToDevice);
+    memcpy(buf_host_plaintext, &plaintext, PLAINTEXT_SIZE);
+
+    cudaMemcpy(buf_device_plaintext, buf_host_plaintext, PLAINTEXT_SIZE, cudaMemcpyHostToDevice);
     cudaMemset((void**)&buf_device_ciphertext, 0, PLAINTEXT_SIZE * MASK_SIZE);
 
     general_order_revealing_encryption_gpu<<<1, 64>>>(buf_device_plaintext, buf_device_ciphertext);
 
-    unsigned int buf_host_ciphertext[4];
     cudaMemcpy(buf_host_ciphertext, buf_device_ciphertext, PLAINTEXT_SIZE * MASK_SIZE, cudaMemcpyDeviceToHost);
     for (int i = 0; i < 4; i++) {
        printf("%08X\n", buf_host_ciphertext[i]);
@@ -590,6 +594,9 @@ void init_env() {
 
     cudaMalloc((void**)&buf_device_plaintext, PLAINTEXT_SIZE);
     cudaMalloc((void**)&buf_device_ciphertext, PLAINTEXT_SIZE * MASK_SIZE);
+
+    cudaMallocHost((void**)&buf_host_ciphertext, PLAINTEXT_SIZE * MASK_SIZE, cudaHostAllocDefault);
+    cudaMallocHost((void**)&buf_host_plaintext, PLAINTEXT_SIZE, cudaHostAllocDefault);
 }
 
 int main() {
