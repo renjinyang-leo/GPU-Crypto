@@ -502,11 +502,13 @@ void free_env() {
 }
 
 int main() {
+    const unsigned N = 5000000;
+
     clock_t start,end;
     start=clock();
 
     init_env();
-    for (int i = 1; i < 1000000; i++) {
+    for (int i = 1; i <= N; i++) {
         encyrpt(i);
     }
 

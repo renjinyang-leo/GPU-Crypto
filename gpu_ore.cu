@@ -19,7 +19,7 @@ typedef unsigned long u32;
 //设置数据块长度16字节（128位）
 //设置gpu中每block中thread数量512
 #define AES_BLOCK_SIZE 16
-#define THREADS_PER_BLOCK 512
+#define THREADS_PER_BLOCK 1024
 #define SEGMENT_SIZE 16
 #define PLAINTEXT_SIZE sizeof(uint64_t)
 #define MASK_SIZE 2
@@ -499,8 +499,8 @@ __global__ void general_order_revealing_encryption_gpu(uint64_t *buf_device_plai
     atomicAdd(&buf_device_ciphertext[index * 4 + cipher_index], ((unsigned int)mask)<<cipher_bit);
 }
 
-__global__ void encyrpt(uint64_t *buf_device_plaintext, unsigned int *buf_device_ciphertext, unsigned int len, unsigned int prev_block) {
-    unsigned int index = (prev_block + blockIdx.x) * THREADS_PER_BLOCK + threadIdx.x;
+__global__ void encyrpt(uint64_t *buf_device_plaintext, unsigned int *buf_device_ciphertext, unsigned int len) {
+    unsigned int index = blockIdx.x * THREADS_PER_BLOCK + threadIdx.x;
     if (index <= len - 1) {
         general_order_revealing_encryption_gpu<<<1, 64>>>(buf_device_plaintext, index, buf_device_ciphertext);
     }
@@ -518,11 +518,7 @@ void load_data(unsigned int len) {
 
 void load_result(unsigned int len) {
     unsigned int *buf_ciphertext = (unsigned int *)malloc(PLAINTEXT_SIZE * MASK_SIZE * len);
-    unsigned int copy_len = 4 * len;
-    for (int i = 0; i < copy_len; i++) {
-        buf_ciphertext[i] = buf_host_ciphertext[i];
-        //printf("%08X\n", buf_ciphertext[i]);
-    }
+    CHECK(cudaMemcpy(buf_ciphertext, buf_host_ciphertext, PLAINTEXT_SIZE * MASK_SIZE * len, cudaMemcpyDeviceToHost));
 }
 
 void init_env(const unsigned len) {
@@ -569,7 +565,6 @@ void init_env(const unsigned len) {
 
     CHECK(cudaHostAlloc((void**)&buf_host_plaintext, PLAINTEXT_SIZE * len, cudaHostAllocWriteCombined));
     CHECK(cudaHostAlloc((void**)&buf_host_ciphertext, PLAINTEXT_SIZE * MASK_SIZE * len, cudaHostAllocMapped));
-    CHECK(cudaMemset(buf_host_ciphertext, 0, PLAINTEXT_SIZE * MASK_SIZE * len));
 
     CHECK(cudaHostGetDevicePointer((void**)&buf_device_ciphertext, buf_host_ciphertext, 0));
 }
@@ -584,7 +579,7 @@ void free_env() {
 }
 
 int main() {
-    const unsigned N = 1000000;
+    const unsigned N = 5000000;
 
     clock_t start,end;
     start=clock();
@@ -595,12 +590,11 @@ int main() {
     }
 
     load_data(N);
-    double batch = 4;
+    double batch = (N + THREADS_PER_BLOCK - 1) / THREADS_PER_BLOCK;;
     dim3 dimBlock(batch);
     dim3 dimGrid(THREADS_PER_BLOCK);
-    for (unsigned int blocks = 0; blocks * THREADS_PER_BLOCK < N; blocks += (unsigned int)batch) {
-        encyrpt<<<dimBlock, dimGrid>>>(buf_device_plaintext, buf_device_ciphertext, N, blocks);
-    }
+    encyrpt<<<dimBlock, dimGrid>>>(buf_device_plaintext, buf_device_ciphertext, N);
+    cudaDeviceSynchronize();
     load_result(N);
 
     end=clock();
