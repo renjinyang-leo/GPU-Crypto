@@ -470,21 +470,24 @@ __global__ void general_order_revealing_encryption_gpu(uint64_t *buf_device_plai
     }
     uint8_t target_bit = 0;
 
+    unsigned int last_index = bits / 8;
+    uint8_t additional_bits = bits % 8;
     uint8_t buf_segment[SEGMENT_SIZE] = {0};
     uint8_t *plaintext = (uint8_t *)&buf_device_plaintext[index];
     memcpy(buf_segment, plaintext, bits/8);
     if (bits % 8 != 0) {
-        unsigned int last_index = bits / 8;
-        uint8_t additional_bits = bits % 8;
         buf_segment[last_index] = plaintext[last_index] & (uint8_t)(1<<additional_bits-1);
         if (!((uint8_t)(buf_segment[last_index] & (uint8_t)(1<<(additional_bits-1))) == (uint8_t)0)) {
             target_bit = 1;
         }
+        // 对前缀取余，不包括当前位
+        buf_segment[last_index] = buf_segment[last_index] & (1<<(additional_bits-1)-1);
     } else {
-        unsigned int last_index = bits / 8;
         if (!((uint8_t)(buf_segment[last_index-1] & (uint8_t)(1<<7)) == (uint8_t)0)) {
             target_bit = 1;
         }
+        // 对前缀取余，不包括当前位
+        buf_segment[last_index-1] = buf_segment[last_index-1] & ((1 << 7) - 1);
     }
 
     aes256_encrypt_ecb(buf_segment);

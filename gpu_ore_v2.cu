@@ -519,19 +519,30 @@ __global__ void general_order_revealing_encryption_gpu(uint8_t *buf_device_plain
     }
     uint8_t target_bit = 0;
 
+    unsigned int last_index = bits / 8;
+    uint8_t additional_bits = bits % 8;
     uint8_t buf_segment[16] = {0};
     memcpy(buf_segment, buf_device_plaintext, bits/8);
     if (bits % 8 != 0) {
-        unsigned int last_index = bits / 8;
-        uint8_t additional_bits = bits % 8;
         buf_segment[last_index] = buf_device_plaintext[last_index] & (uint8_t)(1<<additional_bits-1);
         if (!((uint8_t)(buf_segment[last_index] & (uint8_t)(1<<(additional_bits-1))) == (uint8_t)0)) {
-            if (positive) { target_bit = 1; }
+            target_bit = 1;
         }
+        // 对前缀取余，不包括当前位
+        buf_segment[last_index] = buf_segment[last_index] & (1<<(additional_bits-1)-1);
     } else {
-        unsigned int last_index = bits / 8;
         if (!((uint8_t)(buf_segment[last_index-1] & (uint8_t)(1<<7)) == (uint8_t)0)) {
-            if (positive) { target_bit = 1; }
+            target_bit = 1;
+        }
+        // 对前缀取余，不包括当前位
+        buf_segment[last_index-1] = buf_segment[last_index-1] & ((1 << 7) - 1);
+    }
+
+    if (!positive && bits > 1) {
+        if (target_bit == 1) {
+            target_bit = 0;
+        } else {
+            target_bit = 1;
         }
     }
 
@@ -542,12 +553,14 @@ __global__ void general_order_revealing_encryption_gpu(uint8_t *buf_device_plain
      * **/
     uint8_t mask = buf_segment[0] & ((uint8_t)(1 << MASK_SIZE) - 1);
     mask = (mask + target_bit) % 4;
-    unsigned long cipher_bit = (threadIdx.x * 2) % sizeof(uint32_t);
-    atomicAdd(buf_device_ciphertext, ((unsigned int)mask)<<cipher_bit);
+    unsigned long cipher_bit = (threadIdx.x * 2) % (32);
+    int cipher_index = (threadIdx.x * 2) / (32);
+    atomicAdd(&buf_device_ciphertext[cipher_index], ((unsigned long)mask)<<cipher_bit);
+    __syncthreads();
 }
 
 ciphertext_int64 *
-int64_to_ciphertext_internal(int64 value) {
+int64_to_ciphertext_internal_v2(int64 value) {
     if (!init_gpu_env) {
         init_env();
         init_gpu_env = true;
@@ -560,7 +573,9 @@ int64_to_ciphertext_internal(int64 value) {
     uint32_t *buf_device_ciphertext = nullptr;
 
     CHECK(cudaMalloc((void**)&buf_device_plaintext, INT64_KEY_LEN))
-    CHECK(cudaMalloc((void**)&buf_device_ciphertext, INT64_BUF_LEN))
+    // 这里为了保证内存空间是sizeof(uint32_t)的倍数，所以最少需要20字节，但是有效字节数是INT64_BUF_LEN=18
+    CHECK(cudaMalloc((void**)&buf_device_ciphertext, 20))
+    CHECK(cudaMemset(buf_device_ciphertext, 0, 20))
 
     bool positive;
     if (value >= 0) {positive = true;}
@@ -578,31 +593,103 @@ int64_to_ciphertext_internal(int64 value) {
         cnt = reverse_bit8(cnt);
         u_value = reverse_bit64(u_value);
     }
-    byte* range = (byte*) &cnt;
-    byte* byte_value = (byte*) &u_value;
     byte* code = (byte*)malloc(INT64_KEY_LEN);
-    memcpy(code, range, sizeof(uint8_t));
-    memcpy(code+sizeof(uint8_t), byte_value, sizeof(uint64_t));
+    memcpy(code, &cnt, sizeof(uint8_t));
+    memcpy(code+sizeof(uint8_t), &u_value, sizeof(uint64_t));
 
     // 拷贝明文数据到显存中
-    CHECK(cudaMemcpy(buf_device_plaintext, &code, INT64_KEY_LEN, cudaMemcpyHostToDevice))
+    CHECK(cudaMemcpy(buf_device_plaintext, code, INT64_KEY_LEN, cudaMemcpyHostToDevice))
 
     // 开始并行加密
     dim3 dimBlock(1);
     dim3 dimGrid(INT64_KEY_LEN * 8);
     general_order_revealing_encryption_gpu<<<dimBlock, dimGrid>>>(buf_device_plaintext, buf_device_ciphertext, positive);
-    cudaDeviceSynchronize();
 
     // 将结果拷贝回ctxt中
-    CHECK(cudaMemcpy(ctxt->buf, buf_device_ciphertext, INT64_KEY_LEN, cudaMemcpyDeviceToHost))
+    CHECK(cudaMemcpy(ctxt->buf, buf_device_ciphertext, INT64_BUF_LEN, cudaMemcpyDeviceToHost))
 
     // 释放显存
     CHECK(cudaFree(buf_device_plaintext))
     CHECK(cudaFree(buf_device_ciphertext))
+    free(code);
 
     return ctxt;
 }
 
-int main() {
+void ore_compare_int64_v2(int* result_p, ciphertext_int64 *ctxt1, ciphertext_int64 *ctxt2) {
+    const int MASK_SIZE = 2;
+    const uint8_t MOD = (1 << MASK_SIZE) - 1;
+    int res = 0;
+    for (int i = 0; i < INT64_BUF_LEN; i++) {
+        uint8_t cipher_tmp1 = (uint8_t)ctxt1->buf[i], cipher_tmp2 = (uint8_t)ctxt2->buf[i];
+        for (int j = 0; j < 4; j++) {
+            if (j != 0) {
+                cipher_tmp1 = cipher_tmp1 >> MASK_SIZE;
+                cipher_tmp2 = cipher_tmp2 >> MASK_SIZE;
+            }
+            int8_t cipher_bit1 = (int8_t)(cipher_tmp1 & MOD);
+            int8_t cipher_bit2 = (int8_t)(cipher_tmp2 & MOD);
 
+            // cmp的结果只可能是1或3
+            int8_t cmp = (4 + cipher_bit1 - cipher_bit2) % 4;
+
+            if (cmp != 0) {
+                res = (cmp == 1 ? 1 : -1);
+                break;
+            }
+        }
+        if (res != 0) {
+            break;
+        }
+    }
+    *result_p = res;
+}
+
+void check_vaild() {
+    srand((int)time(0));
+    int MAX = 10000000, MIN = -10000000;
+    int error_count = 0;
+    for (int i = 0; i < 10000; i++) {
+        int x = MIN + rand() % (MAX - MIN + 1);
+        int y = MIN + rand() % (MAX - MIN + 1);
+        int real_cmp = 0;
+        if (x > y) {
+            real_cmp = 1;
+        } else if (x < y) {
+            real_cmp = -1;
+        }
+        ciphertext_int64 *c_x = int64_to_ciphertext_internal_v2(x);
+        ciphertext_int64 *c_y = int64_to_ciphertext_internal_v2(y);
+
+        int cipher_cmp = 0;
+        ore_compare_int64_v2(&cipher_cmp, c_x, c_y);
+
+        if (real_cmp == cipher_cmp) {
+            //printf("执行正确，x = %d, y = %d, real_cmp = %d, cipher_cmp = %d\n", x, y, real_cmp, cipher_cmp);
+        } else {
+            //printf("执行错误，x = %d, y = %d, real_cmp = %d, cipher_cmp = %d\n", x, y, real_cmp, cipher_cmp);
+            error_count++;
+        }
+        free(c_x);
+        free(c_y);
+    }
+    printf("共出现 %d 次执行错误, 正确率 = %lf \n", error_count, (double)(1.0 - (error_count) * 1.0/ 10000));
+}
+
+void experiment_1() {
+    clock_t start,end;
+    start=clock();
+    for (int i = 0; i < 10000; i++) {
+        int64 value = 3253634636;
+        ciphertext_int64 *c_v = int64_to_ciphertext_internal_v2(value);
+        free(c_v);
+    }
+    end=clock();
+    double cost=(double)(end-start)*1000/CLOCKS_PER_SEC;
+    printf("cost time = %lf ms \n", cost);
+}
+
+int main() {
+    check_vaild();
+    experiment_1();
 }

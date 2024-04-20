@@ -35,7 +35,8 @@ set_property(TARGET gpu_ore
 target_compile_options(gpu_ore_v2 PRIVATE $<$<COMPILE_LANGUAGE:CUDA>:
         -arch=sm_61;
         --relocatable-device-code=true
-        >)
+        >
+        -g -G)
 
 set_property(TARGET gpu_ore_v2
         PROPERTY CUDA_SEPARABLE_COMPILATION ON)
